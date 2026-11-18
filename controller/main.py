@@ -33,27 +33,70 @@ cfg = get_config()
 # Lifespan: inicialização e encerramento
 # ─────────────────────────────────────────────────────────────
 
+async def _housekeeping() -> None:
+    """Expira leases e faz deleção física com retry persistente."""
+    import asyncio
+    import httpx
+    from controller import repository as repo
+
+    while True:
+        try:
+            conn = get_db()
+            try:
+                expired = repo.cleanup_expired_uploads(conn)
+                due = repo.due_chunk_cleanup(conn)
+            finally:
+                conn.close()
+            if expired:
+                log.warning('expired_leases_cleaned', count=expired)
+            if due:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    for job in due:
+                        success = False
+                        try:
+                            response = await client.delete(
+                                f"{job['node_url'].rstrip('/')}/chunks/{job['chunk_id']}",
+                                params={'disk_id': job['disk_id']},
+                            )
+                            success = response.status_code in (200, 202, 204, 404)
+                        except httpx.HTTPError as exc:
+                            log.warning('chunk_cleanup_unreachable',
+                                        chunk_id=job['chunk_id'], error=str(exc))
+                        conn = get_db()
+                        try:
+                            repo.finish_chunk_cleanup(
+                                conn, job['chunk_id'], job['disk_id'], success,
+                                job['attempts'],
+                            )
+                        finally:
+                            conn.close()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.exception('housekeeping_failed', error=str(exc))
+        await asyncio.sleep(2)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Inicializa o banco (cria schema se não existir) — RF10
+    import asyncio
+    from contextlib import suppress
+
     conn = get_db()
     conn.close()
-    log.info(
-        "controller_started",
-        replication_factor=cfg.replication_factor,
-        write_quorum=cfg.write_quorum,
-        chunk_size_mb=cfg.chunk_size_mb,
-        encryption=cfg.encryption_enabled,
-    )
+    worker = asyncio.create_task(_housekeeping(), name='pessoa-a-lease-housekeeping')
+    log.info('controller_started', replication_factor=cfg.replication_factor,
+             write_quorum=cfg.write_quorum, chunk_size_mb=cfg.chunk_size_mb,
+             encryption=cfg.encryption_enabled)
+    try:
+        yield
+    finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
+        log.info('controller_stopped')
 
-    # TODO (Pessoa C): iniciar aqui os background tasks:
-    #   - asyncio.create_task(monitor_heartbeats())
-    #   - asyncio.create_task(rereplication_worker())
-    #   - asyncio.create_task(lease_expiry_worker())
 
-    yield
-
-    log.info("controller_stopped")
 
 
 # ─────────────────────────────────────────────────────────────
