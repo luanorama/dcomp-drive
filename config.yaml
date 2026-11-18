@@ -1,0 +1,44 @@
+# DComp Drive — Configuração global
+# Cada chave pode ser sobrescrita por variável de ambiente (ex: REPLICATION_FACTOR=3)
+
+# Replicação
+replication_factor: 3        # N — número de réplicas por arquivo/chunk
+write_quorum: 2              # W — réplicas confirmadas antes de responder ao cliente
+under_replicated_policy: accept  # accept | reject — política quando há menos nós que N
+
+# Chunks
+chunk_size_mb: 4             # Tamanho de cada chunk em MB
+
+# Criptografia (RF9) — executada no cliente
+encryption:
+  enabled: false             # true ativa AES-256-GCM; chave via DRIVE_KEY env var
+  algorithm: aes-256-gcm
+
+# Hash
+hash_algorithm: sha256       # sha256 (padrão)
+
+# Heartbeat e detecção de falhas (RF5)
+heartbeat_interval_s: 3      # Intervalo de envio do heartbeat pelo nó
+suspect_after_s: 6           # Tempo sem heartbeat para marcar como suspeito
+dead_after_s: 10             # Tempo sem heartbeat para marcar como morto
+
+# Gerenciamento de espaço (RF7)
+disk_usage_limit_pct: 90     # Disco acima deste % não recebe novas réplicas
+
+# Concorrência (RF8)
+lease_ttl_s: 60              # TTL do lease de escrita por arquivo
+
+# Re-replicação (RF5)
+rereplication_max_concurrent: 2  # Máximo de cópias simultâneas na re-replicação
+
+# Scrubbing (RF4c)
+scrub_interval_s: 300        # Intervalo da verificação de integridade em segundo plano
+
+# URLs dos componentes (sobrescritas por variáveis de ambiente no Docker)
+controller_url: "http://controller:8000"
+
+# Nó de armazenamento — definido por nó individualmente
+# node_id: "node1"
+# data_dirs:
+#   - "/data/disk1"
+#   - "/data/disk2"

@@ -1,0 +1,18 @@
+# DComp Drive — dependências Python
+# Instalar com: pip install -r requirements.txt
+
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+
+# Validação de dados
+pydantic==2.10.0
+
+# Leitura do config.yaml
+PyYAML==6.0.2
+
+# Cliente HTTP assíncrono (para notificar nós no delete/corrupt)
+httpx==0.28.0
+
+# Criptografia (AES-256-GCM) — Pessoa B
+cryptography==44.0.0
