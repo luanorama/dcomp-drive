@@ -29,14 +29,24 @@ Documento compartilhado: cada pessoa anota o endpoint assim que fica pronto.
 |--------|------|-------|----------|--------|
 | POST | `/chunks/corrupt` | `{chunk_id, disk_id}` | `{ok: true}` | ✅ Implementado |
 
-### Cluster (stubs para Pessoa C)
+### Cluster (Pessoa C)
 | Método | Rota | Corpo | Resposta | Status |
 |--------|------|-------|----------|--------|
-| POST | `/nodes/register` | `{node_id, address, disks:[{disk_id, path, total_bytes, used_bytes}]}` | `{ok: true}` | ✅ Stub |
-| POST | `/nodes/{node_id}/heartbeat` | `{disks:[{disk_id, total_bytes, used_bytes}]}` | `{ok: true}` | ✅ Stub |
-| POST | `/nodes/{node_id}/drain` | — | `{ok: true, queued_chunks: N}` | ✅ Stub |
-| GET | `/status` | — | `{nodes, files_by_state, rereplications}` | ✅ Stub |
-| GET | `/metrics` | — | `{replicas_by_state, files_by_state, ...}` | ✅ Stub |
+| POST | `/nodes/register` | `{node_id, address, disks:[{disk_id, path, total_bytes, used_bytes}]}` | `{ok: true}` | ✅ Implementado |
+| POST | `/nodes/{node_id}/heartbeat` | `{disks:[{disk_id, total_bytes, used_bytes}]}` | `{ok: true}` | ✅ Implementado |
+| POST | `/nodes/{node_id}/drain` | — | `{ok: true, queued_chunks: N}` | ✅ Implementado |
+| GET | `/status` | — | `{nodes, files_by_state, rereplications}` | ✅ Implementado |
+| GET | `/metrics` | — | `{replicas_by_state, files_by_state, ...}` | ✅ Implementado |
+
+O heartbeat usa `path` apenas no registro. Um nó que recebe 404 no heartbeat
+se registra novamente. O controlador confere o inventário de um nó morto que
+voltou antes de torná-lo elegível para novas gravações.
+
+`/status` expõe o espaço livre por disco, cópias em andamento e, durante o drain,
+quantos chunks e exclusões físicas ainda restam no nó. Em `/metrics`,
+`detection_time_s` mede do último heartbeat até o nó ser declarado morto.
+`recovery_time_s` mede da detecção até o retorno a N cópias para os chunks
+afetados. As duas últimas medições ficam em memória até o reinício.
 
 ---
 

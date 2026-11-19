@@ -168,7 +168,7 @@ def _parent_exists(conn: sqlite3.Connection, path: str) -> bool:
 async def _notify_delete_chunk(node_url: str, chunk_id: str, disk_id: str) -> None:
     """Envia DELETE /chunks/{chunk_id}?disk_id= ao nó de forma não bloqueante."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
             await client.delete(
                 f"{node_url}/chunks/{chunk_id}",
                 params={"disk_id": disk_id},
@@ -203,6 +203,7 @@ def allocate_file(
     O diretório pai deve existir previamente.
     """
     path = body.path.rstrip("/")
+    conn.execute("BEGIN IMMEDIATE")
 
     # Verifica diretório pai
     if not _parent_exists(conn, path):
@@ -211,14 +212,9 @@ def allocate_file(
             detail={"error": f"Diretório pai de '{path}' não existe."},
         )
 
-    # Verifica se já existe arquivo commitado (não impede sobrescrita, mas
-    # exige que não haja outro lease ativo — RF8)
-    existing_lease = repo.get_lease(conn, path)
-    if existing_lease is not None:
-        raise HTTPException(
-            status_code=409,
-            detail={"error": f"Outro cliente já está gravando em '{path}'."},
-        )
+    # O worker limpa uploads vencidos antes de liberar o caminho para outro lease.
+    if conn.execute("SELECT 1 FROM leases WHERE path = ?", (path,)).fetchone():
+        raise HTTPException(409, detail={"error": f"Há um upload anterior para '{path}'."})
 
     # Cria entry do tipo file (ou substitui versão anterior)
     existing = repo.get_entry(conn, path)
@@ -247,11 +243,10 @@ def allocate_file(
             """,
             (body.size, now, version, path),
         )
-    conn.commit()
 
     # Cria lease
     lease_id = str(uuid.uuid4())
-    if not repo.create_lease(conn, path, lease_id, body.client_id):
+    if not repo.create_lease(conn, path, lease_id, body.client_id, commit=False):
         raise HTTPException(
             status_code=409,
             detail={"error": f"Conflito de lease para '{path}'."},
@@ -271,7 +266,6 @@ def allocate_file(
         if len(targets) < n:
             if len(targets) == 0:
                 # Sem nenhum nó disponível — aborta
-                repo.delete_lease(conn, path)
                 raise HTTPException(
                     status_code=507,
                     detail={
@@ -282,7 +276,6 @@ def allocate_file(
                     },
                 )
             if cfg.under_replicated_policy == "reject":
-                repo.delete_lease(conn, path)
                 raise HTTPException(
                     status_code=507,
                     detail={
@@ -357,40 +350,43 @@ def commit_file(
     5. Remove o lease.
     6. Libera o estado 'recovering' da entry.
 
-    Se quórum W não for atingido em nenhum chunk → HTTP 507.
+    Se algum chunk não atingir W, responde 507 e mantém o lease até expirar.
     """
     path = body.path
+    conn.execute("BEGIN IMMEDIATE")
     _require_alive_lease(conn, path, body.lease_id)
+
+    allocated = {
+        row["chunk_id"]: row["idx"]
+        for row in conn.execute(
+            "SELECT chunk_id, idx FROM chunks WHERE path = ? AND hash IS NULL", (path,)
+        )
+    }
+    if (not body.chunks or len(body.chunks) != len(allocated)
+            or {item.chunk_id: item.idx for item in body.chunks} != allocated):
+        raise HTTPException(409, detail={"error": "Chunks do commit não conferem com a alocação."})
 
     n = cfg.replication_factor
     w = cfg.write_quorum
-    any_under_replicated = False
-
-    for chunk_info in body.chunks:
-        confirmed = chunk_info.confirmed  # lista de disk_ids onde gravou com sucesso
+    confirmations = {}
+    for item in body.chunks:
+        available = conn.execute(
+            """SELECT r.disk_id FROM replicas r JOIN disks d USING(disk_id)
+               JOIN nodes n USING(node_id) WHERE r.chunk_id = ?
+               AND r.state = 'pending' AND n.status != 'dead' AND d.total_bytes > 0""",
+            (item.chunk_id,),
+        ).fetchall()
+        confirmed = sorted({r["disk_id"] for r in available}.intersection(item.confirmed))
         if len(confirmed) < w:
-            # Quórum não atingido — aborta tudo
-            repo.delete_lease(conn, path)
-            # Reverte entry para estado anterior (remove ou deixa como sub-replicado)
-            existing = repo.get_entry(conn, path)
-            if existing and existing["version"] == 1:
-                # Primeira versão nunca commitada → remove entry
-                conn.execute("DELETE FROM entries WHERE path = ?", (path,))
-            else:
-                conn.execute(
-                    "UPDATE entries SET state = 'under_replicated' WHERE path = ?",
-                    (path,),
-                )
-            conn.commit()
-            raise HTTPException(
-                status_code=507,
-                detail={
-                    "error": (
-                        f"Quórum de escrita não atingido no chunk {chunk_info.idx}: "
-                        f"{len(confirmed)}/{w} réplicas confirmadas."
-                    )
-                },
-            )
+            # O lease segue válido para o cliente tentar completar o upload até expirar.
+            raise HTTPException(507, detail={
+                "error": f"Quórum de escrita não atingido no chunk {item.idx}: {len(confirmed)}/{w}."
+            })
+        confirmations[item.chunk_id] = confirmed
+
+    any_under_replicated = False
+    for chunk_info in body.chunks:
+        confirmed = confirmations[chunk_info.chunk_id]
 
         # Atualiza hash e tamanho do chunk
         conn.execute(
@@ -431,8 +427,8 @@ def commit_file(
         (body.file_hash, total_size, now, final_state, path),
     )
 
-    # Remove lease
-    repo.delete_lease(conn, path)
+    # O arquivo e a remoção do lease ficam visíveis no mesmo commit.
+    conn.execute("DELETE FROM leases WHERE path = ?", (path,))
     conn.commit()
 
     log.info(
@@ -457,12 +453,12 @@ def locate_file(
     """
     Devolve a localização de todos os chunks com suas réplicas vivas.
     O cliente usa esta resposta para ler diretamente dos nós.
-    Leitura só vê a última versão commitada (state != 'recovering').
+    Arquivos commitados continuam legíveis durante a recuperação de réplicas.
     """
     entry = repo.get_entry(conn, path)
     if entry is None or entry["type"] != "file":
         raise HTTPException(status_code=404, detail={"error": f"Arquivo '{path}' não encontrado."})
-    if entry["state"] == "recovering":
+    if entry["state"] == "recovering" and (entry["file_hash"] is None or repo.get_lease(conn, path)):
         raise HTTPException(
             status_code=409,
             detail={"error": f"Arquivo '{path}' está sendo gravado. Tente novamente em instantes."},
@@ -738,7 +734,7 @@ def report_corrupt(
 
     repo.mark_replica_as(conn, body.chunk_id, body.disk_id, "corrupt")
 
-    # Atualiza estado do arquivo para 'recovering' se necessário
+    # Sinaliza a perda de uma réplica nos metadados do arquivo
     live = repo.count_live_replicas(conn, body.chunk_id)
     if live < cfg.replication_factor:
         repo.update_entry_state(conn, chunk["path"], "under_replicated")

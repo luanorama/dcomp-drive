@@ -62,6 +62,8 @@ def register_node(
     node_id: str,
     address: str,
     disks: list[dict[str, Any]],
+    *,
+    commit: bool = True,
 ) -> None:
     """
     Registra (ou atualiza) um nó e seus discos.
@@ -74,7 +76,6 @@ def register_node(
         VALUES(?, ?, 'alive', ?)
         ON CONFLICT(node_id) DO UPDATE SET
             address        = excluded.address,
-            status         = 'alive',
             last_heartbeat = excluded.last_heartbeat
         """,
         (node_id, address, now),
@@ -88,10 +89,12 @@ def register_node(
                 path        = excluded.path,
                 total_bytes = excluded.total_bytes,
                 used_bytes  = excluded.used_bytes
+            WHERE disks.node_id = excluded.node_id
             """,
             (d["disk_id"], node_id, d["path"], d["total_bytes"], d["used_bytes"]),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     log.info("node_registered", node_id=node_id, address=address)
 
 
@@ -113,6 +116,8 @@ def update_node_heartbeat(
     conn: sqlite3.Connection,
     node_id: str,
     disks: list[dict[str, Any]],
+    *,
+    commit: bool = True,
 ) -> bool:
     """
     Atualiza last_heartbeat e espaço dos discos.
@@ -120,7 +125,12 @@ def update_node_heartbeat(
     """
     now = time.time()
     cur = conn.execute(
-        "UPDATE nodes SET last_heartbeat = ?, status = 'alive' WHERE node_id = ?",
+        """UPDATE nodes SET last_heartbeat = ?,
+               status = CASE WHEN status = 'suspect' THEN
+                   CASE WHEN EXISTS (SELECT 1 FROM node_drains WHERE node_id = nodes.node_id)
+                        THEN 'draining' ELSE 'alive' END
+               ELSE status END
+           WHERE node_id = ?""",
         (now, node_id),
     )
     if cur.rowcount == 0:
@@ -129,11 +139,12 @@ def update_node_heartbeat(
         conn.execute(
             """
             UPDATE disks SET total_bytes = ?, used_bytes = ?
-            WHERE disk_id = ?
+            WHERE disk_id = ? AND node_id = ?
             """,
-            (d["total_bytes"], d["used_bytes"], d["disk_id"]),
+            (d["total_bytes"], d["used_bytes"], d["disk_id"], node_id),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     return True
 
 
@@ -180,6 +191,7 @@ def choose_replication_targets(
     n: int,
     exclude_disks: list[str] | None = None,
     exclude_nodes: list[str] | None = None,
+    required_bytes: int = 0,
 ) -> list[dict[str, Any]]:
     """
     Escolhe até `n` discos para replicação respeitando as regras:
@@ -191,6 +203,8 @@ def choose_replication_targets(
 
     Retorna lista de dicts com: disk_id, node_id, path, node_url (address do nó).
     """
+    if n <= 0:
+        return []
     exclude_disks = exclude_disks or []
     exclude_nodes = exclude_nodes or []
     limit_pct = cfg.disk_usage_limit_pct / 100.0
@@ -205,9 +219,10 @@ def choose_replication_targets(
         WHERE  n.status = 'alive'
           AND  d.total_bytes > 0
           AND  CAST(d.used_bytes AS REAL) / d.total_bytes < ?
+          AND  d.total_bytes - d.used_bytes >= ?
         ORDER BY (d.total_bytes - d.used_bytes) DESC
         """,
-        (limit_pct,),
+        (limit_pct, required_bytes),
     ).fetchall()
 
     chosen: list[dict[str, Any]] = []
@@ -321,7 +336,9 @@ def count_live_replicas(
     conn: sqlite3.Connection, chunk_id: str
 ) -> int:
     row = conn.execute(
-        "SELECT COUNT(*) FROM replicas WHERE chunk_id = ? AND state = 'ok'",
+        """SELECT COUNT(DISTINCT d.node_id) FROM replicas r JOIN disks d USING(disk_id)
+           JOIN nodes n USING(node_id) WHERE r.chunk_id = ? AND r.state = 'ok'
+           AND n.status IN ('alive', 'suspect', 'draining')""",
         (chunk_id,),
     ).fetchone()
     return row[0] if row else 0
@@ -343,14 +360,14 @@ def get_live_replicas(
     rows = conn.execute(
         """
         SELECT r.chunk_id, r.disk_id, r.state,
-               n.address AS node_url, n.node_id
+               n.address AS node_url, n.node_id, n.status
         FROM   replicas r
         JOIN   disks    d USING(disk_id)
         JOIN   nodes    n USING(node_id)
         WHERE  r.chunk_id = ?
           AND  r.state    = 'ok'
-          AND  n.status   IN ('alive', 'suspect')
-        ORDER  BY n.status ASC   -- alive primeiro
+          AND  n.status   IN ('alive', 'suspect', 'draining')
+        ORDER  BY CASE n.status WHEN 'alive' THEN 0 WHEN 'draining' THEN 1 ELSE 2 END
         """,
         (chunk_id,),
     ).fetchall()
@@ -426,6 +443,8 @@ def create_lease(
     path: str,
     lease_id: str,
     client_id: str | None,
+    *,
+    commit: bool = True,
 ) -> bool:
     """
     Cria um lease de escrita para o path.
@@ -445,7 +464,8 @@ def create_lease(
             "INSERT INTO leases(path, client_id, lease_id, expires_at) VALUES(?,?,?,?)",
             (path, client_id, lease_id, expires_at),
         )
-        conn.commit()
+        if commit:
+            conn.commit()
         return True
     except sqlite3.IntegrityError:
         return False  # Já existe lease ativo → 409

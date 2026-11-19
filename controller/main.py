@@ -6,13 +6,10 @@ Inicializa o banco (schema SQLite WAL), monta os routers de arquivo e cluster,
 e expõe /health. Para subir:
     uvicorn controller.main:app --host 0.0.0.0 --port 8000 --reload
 
-A Pessoa C adicionará os background tasks (monitor de heartbeat, fila de
-re-replicação e worker de expiração de leases) neste mesmo arquivo ou em
-controller/workers/.
 """
 from __future__ import annotations
 
-import os
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -24,6 +21,7 @@ from controller.db import get_db
 from controller.logger import get_logger
 from controller.routers.files import router as files_router
 from controller.routers.cluster import router as cluster_router
+from controller.workers.cluster import ClusterWorker
 
 log = get_logger("controller.main")
 cfg = get_config()
@@ -46,14 +44,14 @@ async def lifespan(app: FastAPI):
         encryption=cfg.encryption_enabled,
     )
 
-    # TODO (Pessoa C): iniciar aqui os background tasks:
-    #   - asyncio.create_task(monitor_heartbeats())
-    #   - asyncio.create_task(rereplication_worker())
-    #   - asyncio.create_task(lease_expiry_worker())
-
-    yield
-
-    log.info("controller_stopped")
+    app.state.cluster_worker = ClusterWorker()
+    task = asyncio.create_task(app.state.cluster_worker.run())
+    try:
+        yield
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        log.info("controller_stopped")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -73,7 +71,7 @@ app = FastAPI(
 # Routers da Pessoa A
 app.include_router(files_router, tags=["Arquivos e Diretórios"])
 
-# Routers da Pessoa C (stubs fornecidos pela Pessoa A)
+# Rotas de operação do cluster
 app.include_router(cluster_router, tags=["Cluster e Nós"])
 
 

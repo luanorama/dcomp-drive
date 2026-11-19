@@ -104,6 +104,22 @@ CREATE TABLE IF NOT EXISTS leases (
     expires_at REAL NOT NULL
 );
 
+-- Estado do drain separado do estado de conectividade do nó.
+CREATE TABLE IF NOT EXISTS node_drains (
+    node_id TEXT PRIMARY KEY REFERENCES nodes(node_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS node_rejoins (
+    node_id TEXT PRIMARY KEY REFERENCES nodes(node_id) ON DELETE CASCADE,
+    registered_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS chunk_deletions (
+    chunk_id TEXT NOT NULL,
+    disk_id TEXT NOT NULL REFERENCES disks(disk_id) ON DELETE CASCADE,
+    PRIMARY KEY (chunk_id, disk_id)
+);
+
 -- ============================================================
 -- Índices para consultas frequentes
 -- ============================================================

@@ -62,7 +62,7 @@ class _ContextLogger(logging.LoggerAdapter):
         self, level: int, event: str, exc_info: bool = False, **fields: Any
     ) -> None:
         # 'exc_info' é um atributo nativo do LogRecord — não pode entrar no dict extra
-        extra = {**self.extra, **fields}
+        extra = {"extra_fields": {**self.extra, **fields}}
         self.logger.log(level, event, extra=extra, exc_info=exc_info)
 
     def debug(self, event: str, **fields: Any) -> None:  # type: ignore[override]
