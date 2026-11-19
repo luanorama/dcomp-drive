@@ -31,7 +31,9 @@ def seed(client, path):
     targets = chunk["targets"]
     for target in targets:
         data(client.put(f"{target['node_url']}/chunks/{chunk['chunk_id']}",
-                        params={"disk_id": target["disk_id"], "hash": digest}, content=sample))
+                        params={"disk_id": target["disk_id"], "hash": digest},
+                        headers={"Content-Type": "application/octet-stream"},
+                        content=sample))
     data(client.post(f"{controller}/files/commit", json={
         "path": path, "lease_id": allocation["lease_id"], "file_hash": digest,
         "chunks": [{"idx": 0, "chunk_id": chunk["chunk_id"], "hash": digest,
