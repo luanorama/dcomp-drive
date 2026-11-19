@@ -14,21 +14,8 @@ case "$action" in
     disk=${3:-}
     chunk=${4:-}
     case "$disk" in disk1|disk2) ;; *) exit 2 ;; esac
-    docker compose --profile storage exec -T "$node" python -c '
-from pathlib import Path
-from sys import argv
-from uuid import UUID
-
-disk, chunk = argv[1:]
-if str(UUID(chunk)) != chunk:
-    raise SystemExit("Informe o UUID do chunk")
-path = Path("/data", disk, chunk)
-with path.open("r+b") as file:
-    first = file.read(1)
-    file.seek(0)
-    file.write(bytes([first[0] ^ 1]) if first else b"\x01")
-print(f"Chunk alterado: {path}")
-' "$disk" "$chunk"
+    docker compose --profile storage exec -T "$node" \
+      python /app/scripts/corrupt_chunk.py "/data/$disk" "$chunk"
     ;;
   *) echo "Ação desconhecida: $action" >&2; exit 2 ;;
 esac

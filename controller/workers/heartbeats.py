@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 from contextlib import closing
+from dataclasses import dataclass
 
 from controller.config import get_config
 from controller.db import get_db
@@ -13,7 +14,14 @@ cfg = get_config()
 log = get_logger("controller.heartbeats")
 
 
-def check_heartbeats(now: float | None = None) -> list[tuple[float, list[str]]]:
+@dataclass(frozen=True)
+class NodeFailure:
+    seconds_since_heartbeat: float
+    affected_chunks: int
+    pending_chunks: frozenset[str]
+
+
+def check_heartbeats(now: float | None = None) -> list[NodeFailure]:
     """Atualiza nós e réplicas na mesma transação e retorna as falhas detectadas."""
     now = time.time() if now is None else now
     failures = []
@@ -41,10 +49,17 @@ def check_heartbeats(now: float | None = None) -> list[tuple[float, list[str]]]:
                 continue
 
             chunks = conn.execute(
-                """SELECT DISTINCT r.chunk_id, c.path
+                """SELECT DISTINCT r.chunk_id, c.path,
+                       (SELECT COUNT(*)
+                        FROM replicas other JOIN disks od USING(disk_id)
+                        JOIN nodes onode USING(node_id)
+                        WHERE other.chunk_id = r.chunk_id AND other.state = 'ok'
+                          AND od.total_bytes > 0 AND onode.status = 'alive')
+                        < COALESCE(e.replication_factor, ?) AS needs_repair
                    FROM replicas r JOIN disks d USING(disk_id) JOIN chunks c USING(chunk_id)
+                   JOIN entries e ON e.path = c.path
                    WHERE d.node_id = ? AND r.state = 'ok'""",
-                (node_id,),
+                (cfg.replication_factor, node_id),
             ).fetchall()
             conn.execute(
                 """UPDATE replicas SET state = 'lost' WHERE state = 'ok'
@@ -52,7 +67,11 @@ def check_heartbeats(now: float | None = None) -> list[tuple[float, list[str]]]:
                 (node_id,),
             )
             refresh_files(conn, {chunk["path"] for chunk in chunks})
-            failures.append((elapsed, [chunk["chunk_id"] for chunk in chunks]))
+            failures.append(NodeFailure(
+                seconds_since_heartbeat=elapsed,
+                affected_chunks=len(chunks),
+                pending_chunks=frozenset(c["chunk_id"] for c in chunks if c["needs_repair"]),
+            ))
 
         conn.execute(
             """DELETE FROM node_rejoins WHERE node_id IN (

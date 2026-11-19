@@ -73,6 +73,17 @@ def replication_target(conn, path):
     return (entry and entry["replication_factor"]) or cfg.replication_factor
 
 
+def completed_repairs(chunk_ids):
+    with closing(get_db()) as conn, conn:
+        conn.execute("BEGIN")
+        completed = set()
+        for chunk_id in chunk_ids:
+            chunk = repo.get_chunk(conn, chunk_id)
+            if not chunk or healthy_count(conn, chunk_id) >= replication_target(conn, chunk["path"]):
+                completed.add(chunk_id)
+        return completed
+
+
 def retire_draining(conn, chunk_id, desired):
     if healthy_count(conn, chunk_id) < desired:
         return
