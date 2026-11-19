@@ -1,0 +1,91 @@
+x-storage: &storage
+  build: .
+  profiles: [storage]
+  command: [uvicorn, "storage_node.service:app", --host, 0.0.0.0, --port, "9000", --reload, --reload-dir, /app]
+  depends_on:
+    controller:
+      condition: service_healthy
+
+x-storage-env: &storage-env
+  CONTROLLER_URL: http://controller:8000
+  DATA_DIRS: /data/disk1:/data/disk2
+
+services:
+  controller:
+    build: .
+    command: [uvicorn, "controller.main:app", --host, 0.0.0.0, --port, "8000", --reload, --reload-dir, /app]
+    environment:
+      DB_PATH: /data/controller.db
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - .:/app
+      - metadata:/data
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  node1:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      NODE_ID: node1
+    volumes:
+      - .:/app
+      - node1_disk1:/data/disk1
+      - node1_disk2:/data/disk2
+
+  node2:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      NODE_ID: node2
+    volumes:
+      - .:/app
+      - node2_disk1:/data/disk1
+      - node2_disk2:/data/disk2
+
+  node3:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      NODE_ID: node3
+    volumes:
+      - .:/app
+      - node3_disk1:/data/disk1
+      - node3_disk2:/data/disk2
+
+  node4:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      NODE_ID: node4
+    volumes:
+      - .:/app
+      - node4_disk1:/data/disk1
+      - node4_disk2:/data/disk2
+
+  node5:
+    <<: *storage
+    environment:
+      <<: *storage-env
+      NODE_ID: node5
+    volumes:
+      - .:/app
+      - node5_disk1:/data/disk1
+      - node5_disk2:/data/disk2
+
+volumes:
+  metadata:
+  node1_disk1:
+  node1_disk2:
+  node2_disk1:
+  node2_disk2:
+  node3_disk1:
+  node3_disk2:
+  node4_disk1:
+  node4_disk2:
+  node5_disk1:
+  node5_disk2:
