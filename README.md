@@ -55,27 +55,26 @@ Inspirado em HDFS, GFS, Ceph e MinIO.
 
 ### Opção 1: Docker Compose (recomendado)
 
-O controlador pode subir sozinho enquanto os endpoints de armazenamento estão
-em desenvolvimento.
+Para testar apenas a API de metadados, suba o controlador sozinho.
 
 ```bash
 docker compose up --build controller
 curl -s http://localhost:8000/health
 ```
 
-Com a aplicação do nó disponível em `storage_node/main.py`, o perfil `storage`
-sobe um controlador e cinco nós, com dois volumes de dados por nó.
+O perfil `storage` sobe o controlador e cinco nós, com dois volumes de dados por nó.
 
 ```bash
 docker compose --profile storage up --build -d
-curl -s http://localhost:8000/status
+curl -fsS http://localhost:8000/status | python3 -m json.tool
+# Após confirmar os cinco nós como alive:
 bash scripts/test-recovery.sh
 ```
 
 O teste grava um arquivo de amostra, para um nó que contém uma réplica, aguarda
 a recuperação, confere o SHA-256 em cada réplica recuperada e religa o nó.
-Use um ambiente de teste. Para simular uma corrupção, obtenha o UUID do chunk
-e o disco pelo estado do arquivo e rode `bash scripts/fault.sh corrupt node1 disk1 UUID`.
+O [roteiro da demonstração](docs/demo-parte1.md) inclui o uso do CLI, a
+conferência de hashes e um teste de corrupção em um arquivo de amostra.
 
 O `drain` pode ser solicitado por `POST /nodes/node1/drain`. Aguarde
 `drain_remaining_chunks: 0` e `pending_deletions: 0` em `/status` antes de desligar o nó.
@@ -92,6 +91,7 @@ DB_PATH=./controller.db uvicorn controller.main:app --host 0.0.0.0 --port 8000 -
 
 # Em outro terminal, subir um nó de armazenamento (porta 9000)
 NODE_ID=node1 DATA_DIRS=/tmp/dcomp/node1/disk1:/tmp/dcomp/node1/disk2 \
+  CONTROLLER_URL=http://127.0.0.1:8000 NODE_ADDRESS=http://127.0.0.1:9000 \
   uvicorn storage_node.service:app --host 0.0.0.0 --port 9000 --reload
 ```
 
@@ -112,14 +112,31 @@ Todas as configurações ficam em [`config.yaml`](config.yaml) e podem ser sobre
 | `dead_after_s` | 10 | `DEAD_AFTER_S` | Tempo para marcar nó como morto |
 | `disk_usage_limit_pct` | 90 | `DISK_USAGE_LIMIT_PCT` | Limite de uso do disco (%) |
 | `lease_ttl_s` | 60 | `LEASE_TTL_S` | TTL do lease de escrita |
-| `under_replicated_policy` | accept | `UNDER_REPLICATED_POLICY` | Política quando há menos nós que N |
+| `under_replicated_policy` | accept | `UNDER_REPLICATED_POLICY` | Política quando há menos de N discos elegíveis |
 | `scrub_interval_s` | 300 | `SCRUB_INTERVAL_S` | Intervalo de scrubbing em segundo plano |
 
-A chave de criptografia é passada pela variável `DRIVE_KEY`.
+A chave de criptografia é passada pela variável `DRIVE_KEY`. A alocação prioriza
+nós diferentes. Quando faltam nós, discos adicionais do mesmo nó podem completar N
+com um aviso. Nesse caso, N cópias não oferecem tolerância à perda de N − 1 nós.
+A política `accept`/`reject` considera a quantidade de discos elegíveis.
 
 ---
 
 ## Comandos do CLI
+
+No Docker Compose, rode o CLI dentro do contêiner do controlador para que o cliente
+resolva os nomes `node1` a `node5`. Defina esta função no Bash do host.
+
+```bash
+dcomp-cli() {
+  docker compose --profile storage exec -T controller \
+    python -m client --controller http://controller:8000 "$@"
+}
+```
+
+Arquivos locais usados por `put` e `get` ficam na raiz do repositório, montada
+em `/app` no contêiner. Em uma instalação inteiramente local, use
+`python -m client --controller http://127.0.0.1:8000` seguido do comando.
 
 ```bash
 # Criar diretório
@@ -203,11 +220,8 @@ Documentação completa em [`docs/endpoints.md`](docs/endpoints.md).
 ## Testes
 
 ```bash
-# Rodar os testes
-pip install pytest
-python -m pytest tests/ -v
-
-# Resultado esperado: 19 passed
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest -q
 ```
 
 ### Testes implementados
@@ -255,7 +269,7 @@ dcomp-drive/
 │   ├── agent.py                   # Registro e heartbeat (Pessoa C)
 │   └── scrubbing.py               # Verificação de integridade (Pessoa B)
 ├── client/                        # Cliente CLI (Pessoa B)
-├── deploy/                        # Docker Compose e configs de deploy
+├── docker-compose.yml            # Um controlador e cinco nós de armazenamento
 ├── scripts/                       # Scripts de injeção de falha
 ├── docs/
 │   └── endpoints.md               # Contrato de API compartilhado
@@ -287,6 +301,9 @@ dcomp-drive/
 | **C** | Docker Compose, heartbeat, detecção de falhas, re-replicação, drain, logs | RF5, RF6, RF11, RF12 |
 
 ---
+
+O [relatório técnico da Parte 1](docs/relatorio-parte1.md) reúne as decisões,
+as responsabilidades e as evidências da equipe.
 
 ## Limitações Conhecidas
 

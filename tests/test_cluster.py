@@ -126,6 +126,22 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(len({r["disk_id"].split("/")[0] for r in ok}), 3)
         self.assertIsNotNone(worker.recovery_time_s)
 
+    def test_recovery_metric_when_replication_finishes_before_death(self):
+        _, node = self.seed()
+        worker = ClusterWorker()
+        self.age(node, 7)
+        asyncio.run(worker.monitor())
+        self.assertEqual(self.nodes()[node]["status"], "suspect")
+
+        self.run_worker(worker.repair, lambda request: httpx.Response(200, json={"ok": True}))
+        self.age(node, 11)
+        asyncio.run(worker.monitor())
+
+        self.assertEqual(self.nodes()[node]["status"], "dead")
+        self.assertEqual(self.state()["state"], "intact")
+        self.assertEqual(worker.recovery_time_s, 0.0)
+        self.assertEqual(worker.failures, [])
+
     def test_repair_respects_the_files_replication_factor(self):
         _, node = self.seed(replication_factor=2)
         self.age(node, 11)

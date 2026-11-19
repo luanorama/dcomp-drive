@@ -50,11 +50,22 @@ class ClusterWorker:
         self.failures = [item for item in self.failures if item[1]]
 
     async def monitor(self):
-        for elapsed, chunks in await asyncio.to_thread(heartbeats.check_heartbeats):
-            self.detection_time_s = round(elapsed, 3)
+        pending = set()
+        for failure in await asyncio.to_thread(heartbeats.check_heartbeats):
+            self.detection_time_s = round(failure.seconds_since_heartbeat, 3)
             self.recovery_time_s = None
-            if chunks:
-                self.failures.append((time.monotonic(), set(chunks)))
+            if failure.pending_chunks:
+                self.failures.append((time.monotonic(), set(failure.pending_chunks)))
+                pending.update(failure.pending_chunks)
+            elif failure.affected_chunks:
+                # As cópias podem terminar enquanto o nó ainda está suspeito.
+                self.recovery_time_s = 0.0
+                log.info("failure_recovered", recovery_time_s=self.recovery_time_s)
+
+        if pending:
+            # Uma cópia pode terminar entre o commit da detecção e o registro acima.
+            for chunk_id in await asyncio.to_thread(maintenance.completed_repairs, pending):
+                self.restored(chunk_id)
 
     async def copy_chunk(self, client, chunk, sources, target):
         chunk_id = chunk["chunk_id"]

@@ -46,7 +46,8 @@ voltou antes de torná-lo elegível para novas gravações.
 quantos chunks e exclusões físicas ainda restam no nó. Em `/metrics`,
 `detection_time_s` mede do último heartbeat até o nó ser declarado morto.
 `recovery_time_s` mede da detecção até o retorno a N cópias para os chunks
-afetados. As duas últimas medições ficam em memória até o reinício.
+afetados. Se a reposição terminar enquanto o nó ainda estiver suspeito,
+o tempo após a detecção é `0.0`. As duas últimas medições ficam em memória até o reinício.
 
 ---
 
