@@ -20,8 +20,7 @@ def file_recovering(path):
     with closing(get_db()) as conn, conn:
         conn.execute(
             """UPDATE entries SET state = 'recovering'
-               WHERE path = ? AND state = 'under_replicated'
-               AND NOT EXISTS (SELECT 1 FROM leases WHERE leases.path = entries.path)""",
+               WHERE path = ? AND state = 'under_replicated' """,
             (path,),
         )
 
@@ -125,7 +124,7 @@ class ClusterWorker:
     async def delete_chunk(self, client, row):
         try:
             response = await client.delete(
-                f"{row['address'].rstrip('/')}/chunks/{row['chunk_id']}",
+                f"{row['node_url'].rstrip('/')}/chunks/{row['chunk_id']}",
                 params={"disk_id": row["disk_id"]},
             )
             success = response.is_success or response.status_code == 404

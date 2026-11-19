@@ -103,3 +103,38 @@ Funções do `repository.py` para a Pessoa C:
 | 409 | Lease ativo; diretório não vazio; destino já existe |
 | 422 | Hash não confere (gravação ou leitura) |
 | 507 | Nós/espaço insuficientes para N réplicas, ou W não atingido |
+
+
+## Pessoa A — Gravação com versionamento e limpeza de leases
+
+- `POST /files/allocate` admite o campo opcional `replication_factor` (N) inteiro
+  e maior ou igual ao quorum global W. Sem o campo, aplica N global.
+- A alocação reserva `staged_chunks`/`staged_replicas` em uma transação de
+  escrita (`BEGIN IMMEDIATE`), sem modificar a versão confirmada anterior.
+- `POST /files/commit` exige todos os chunks e índices reservados, todos os
+  `chunk_id` pertencentes ao lease/path, discos de confirmação distintos e
+  pertencentes à alocação, tamanho total igual ao declarado e quorum W por chunk.
+  Somente após validar todos os chunks promove a nova versão atomicamente.
+- Se W falhar, aborta o staging; a versão anterior continua disponível.
+- `GET /files/locate` e `/files/stat` leem uma única snapshot do SQLite. Durante
+  a regravação retornam a versão anteriormente confirmada. Arquivo novo sem
+  commit retorna 409 no locate.
+- `replication_factor` é persistido em `entries`, e o worker de recuperação
+  deve consultar esse N ao reparar chunks.
+- O housekeeping de Pessoa A, iniciado no lifespan do controlador, expira
+  leases, limpa staging e agenda remoções físicas em `chunk_cleanup_queue`.
+  Deleções são repetidas em falhas de comunicação; chunks substituídos têm
+  prazo de 60 segundos para leituras já iniciadas.
+- O posicionamento prefere uma réplica por máquina; se não houver máquinas
+  suficientes, permite discos distintos da mesma máquina, sem usar discos ou
+  nós explicitamente excluídos.
+
+**Erros relevantes**: 409 (lease concorrente/expirado), 422 (chunk/índice/disco
+inválidos ou tamanho divergente, N < W), 507 (destinos insuficientes ou W não
+atingido). As validações de hash real continuam responsabilidade do cliente
+(Pessoa B) e dos nós de armazenamento.
+
+**Migração**: o banco SQLite existente recebe tabelas de staging/limpeza e
+colunas opcionais automaticamente no primeiro `get_db()`. Escritas antigas em
+andamento iniciadas pela versão anterior do código não são restauráveis com
+segurança: finalize/cancele-as antes de implantar esta alteração.

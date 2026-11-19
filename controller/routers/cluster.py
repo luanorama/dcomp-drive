@@ -148,8 +148,14 @@ def get_status(
     nodes = repo.list_nodes(conn)
     pending_cleanup = {
         row["node_id"]: row["waiting"] for row in conn.execute(
-            """SELECT d.node_id, COUNT(*) AS waiting FROM chunk_deletions
+            """SELECT d.node_id, COUNT(*) AS waiting FROM chunk_cleanup_queue
                JOIN disks d USING(disk_id) GROUP BY d.node_id"""
+        )
+    }
+    staged = {
+        row["node_id"]: row["waiting"] for row in conn.execute(
+            """SELECT d.node_id, COUNT(DISTINCT r.chunk_id) AS waiting
+               FROM staged_replicas r JOIN disks d USING(disk_id) GROUP BY d.node_id"""
         )
     }
     nodes_out = []
@@ -163,7 +169,7 @@ def get_status(
             "drain_remaining_chunks": len({
                 c["chunk_id"] for c in repo.list_chunks_of_node(conn, n["node_id"])
                 if c["state"] in ("ok", "pending")
-            }) if n["status"] == "draining" else None,
+            }) + staged.get(n["node_id"], 0) if n["status"] == "draining" else None,
             "pending_deletions": pending_cleanup.get(n["node_id"], 0),
             "disks": [
                 {

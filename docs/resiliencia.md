@@ -13,7 +13,8 @@ de leitura até que elas sejam recuperadas.
 
 A recuperação consulta os metadados por ordem de menor número de fontes. O
 controlador reaproveita a regra de posicionamento para escolher um disco com
-espaço num nó que ainda não tem uma cópia e solicita a transferência diretamente
+espaço num nó que ainda não tem uma cópia. Se faltarem máquinas, pode usar outro disco
+de um nó que já tem uma cópia. O controlador solicita a transferência diretamente
 ao nó de origem. Apenas após a confirmação do destino ele publica a nova
 réplica. Há até duas cópias simultâneas na configuração padrão e uma por
 arquivo de cada vez. Se não houver destino, o controlador aguarda recursos.

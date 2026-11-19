@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import tempfile
 import time
 import unittest
@@ -29,7 +30,7 @@ class ClusterTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
-        database = patch.object(db, "_DEFAULT_DB_PATH", Path(directory.name) / "test.db")
+        database = patch.dict(os.environ, {"DB_PATH": str(Path(directory.name) / "test.db")})
         database.start()
         self.addCleanup(database.stop)
         self.client = TestClient(app)
@@ -53,15 +54,16 @@ class ClusterTests(unittest.TestCase):
     def nodes(self):
         return {n["node_id"]: n for n in self.client.get("/status").json()["nodes"]}
 
-    def allocate(self):
+    def allocate(self, replication_factor=3):
         response = self.client.post("/files/allocate", json={
             "path": "/teste.txt", "size": len(DATA), "num_chunks": 1,
+            "replication_factor": replication_factor,
         })
         response.raise_for_status()
         return response.json()
 
-    def seed(self):
-        allocation = self.allocate()
+    def seed(self, replication_factor=3):
+        allocation = self.allocate(replication_factor)
         chunk = allocation["chunks"][0]
         response = self.client.post("/files/commit", json={
             "path": "/teste.txt", "lease_id": allocation["lease_id"], "file_hash": HASH,
@@ -123,6 +125,32 @@ class ClusterTests(unittest.TestCase):
         ok = [r for r in after["chunks"][0]["replicas"] if r["state"] == "ok"]
         self.assertEqual(len({r["disk_id"].split("/")[0] for r in ok}), 3)
         self.assertIsNotNone(worker.recovery_time_s)
+
+    def test_repair_respects_the_files_replication_factor(self):
+        _, node = self.seed(replication_factor=2)
+        self.age(node, 11)
+        worker = ClusterWorker()
+        asyncio.run(worker.monitor())
+        self.run_worker(worker.repair, lambda request: httpx.Response(200, json={"ok": True}))
+        state = self.state()
+        self.assertEqual(state["state"], "intact")
+        self.assertEqual(sum(r["state"] == "ok" for r in state["chunks"][0]["replicas"]), 2)
+        self.assertEqual(maintenance.copy_candidates(), [])
+
+    def test_commit_ignores_confirmations_from_dead_nodes(self):
+        allocation = self.allocate()
+        chunk = allocation["chunks"][0]
+        for target in chunk["targets"][:2]:
+            self.age(target["disk_id"].split("/")[0], 11)
+        heartbeats.check_heartbeats()
+
+        response = self.client.post("/files/commit", json={
+            "path": "/teste.txt", "lease_id": allocation["lease_id"], "file_hash": HASH,
+            "chunks": [{"idx": 0, "chunk_id": chunk["chunk_id"], "hash": HASH,
+                        "size": len(DATA), "confirmed": [t["disk_id"] for t in chunk["targets"]]}],
+        })
+        self.assertEqual(response.status_code, 507)
+        self.assertEqual(len(maintenance.pending_deletions()), 1)
 
     def test_drain_keeps_source_until_replacement_is_confirmed(self):
         chunk, node = self.seed()

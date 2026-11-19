@@ -12,7 +12,7 @@ import httpx
 from controller.config import get_config
 from controller.db import get_db
 from controller.logger import get_logger
-from controller.workers.maintenance import healthy_count, queue_delete, refresh_files
+from controller.workers.maintenance import healthy_count, queue_delete, refresh_files, replication_target
 
 cfg = get_config()
 log = get_logger("controller.reconciliation")
@@ -70,23 +70,24 @@ def finish_rejoin(node, inventory, verified):
             ).fetchone()
             if replica and (replica["state"] == "pending" or replica["hash"] is None):
                 continue
+            if conn.execute(
+                "SELECT 1 FROM staged_replicas WHERE chunk_id = ? AND disk_id = ?",
+                (chunk_id, disk_id),
+            ).fetchone():
+                continue
 
             expected = verified.get((chunk_id, disk_id))
-            same_node = conn.execute(
-                """SELECT 1 FROM replicas r JOIN disks d USING(disk_id)
-                   WHERE r.chunk_id = ? AND d.node_id = ? AND r.state = 'ok'""",
-                (chunk_id, node_id),
-            ).fetchone()
+            desired = replication_target(conn, replica["path"]) if replica else None
             queued = conn.execute(
-                "SELECT 1 FROM chunk_deletions WHERE chunk_id = ? AND disk_id = ?",
+                "SELECT 1 FROM chunk_cleanup_queue WHERE chunk_id = ? AND disk_id = ?",
                 (chunk_id, disk_id),
             ).fetchone()
-            if (replica and expected and expected == replica["hash"] and not same_node
-                    and not queued and healthy_count(conn, chunk_id) < cfg.replication_factor):
+            if (replica and expected and expected == replica["hash"]
+                    and not queued and healthy_count(conn, chunk_id) < desired):
                 conn.execute("UPDATE replicas SET state = 'ok' WHERE chunk_id = ? AND disk_id = ?",
                              (chunk_id, disk_id))
                 paths.add(replica["path"])
-                if healthy_count(conn, chunk_id) >= cfg.replication_factor:
+                if healthy_count(conn, chunk_id) >= desired:
                     restored.append(chunk_id)
             elif not replica or replica["state"] != "ok":
                 queue_delete(conn, chunk_id, disk_id)
