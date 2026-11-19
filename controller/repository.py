@@ -193,55 +193,55 @@ def choose_replication_targets(
     exclude_nodes: list[str] | None = None,
     required_bytes: int = 0,
 ) -> list[dict[str, Any]]:
-    """
-    Escolhe até `n` discos para replicação respeitando as regras:
-      1. Nó deve estar com status = 'alive' (nunca suspect, dead ou draining)
-      2. Disco não pode estar em exclude_disks
-      3. Nó não pode estar em exclude_nodes
-      4. Disco não pode estar acima do limite de uso (disk_usage_limit_pct)
-      5. Ordena por espaço livre decrescente (greedy)
+    """Prioriza máquinas distintas; se faltarem máquinas, usa outro disco.
 
-    Retorna lista de dicts com: disk_id, node_id, path, node_url (address do nó).
+    Nunca repete o mesmo disco e nunca usa nós explicitamente excluídos.
+    Nós suspeitos/mortos/draining e discos acima do limite são inelegíveis.
     """
     if n <= 0:
         return []
-    exclude_disks = exclude_disks or []
-    exclude_nodes = exclude_nodes or []
-    limit_pct = cfg.disk_usage_limit_pct / 100.0
-
+    excluded_disks = set(exclude_disks or [])
+    excluded_nodes = set(exclude_nodes or [])
     rows = conn.execute(
         """
-        SELECT d.disk_id, d.node_id, d.path,
-               d.total_bytes, d.used_bytes,
+        SELECT d.disk_id, d.node_id, d.path, d.total_bytes, d.used_bytes,
                n.address AS node_url
-        FROM   disks d
-        JOIN   nodes n USING(node_id)
-        WHERE  n.status = 'alive'
-          AND  d.total_bytes > 0
-          AND  CAST(d.used_bytes AS REAL) / d.total_bytes < ?
-          AND  d.total_bytes - d.used_bytes >= ?
-        ORDER BY (d.total_bytes - d.used_bytes) DESC
+        FROM disks d JOIN nodes n USING(node_id)
+        WHERE n.status = 'alive'
+          AND d.total_bytes > 0
+          AND CAST(d.used_bytes AS REAL) / d.total_bytes < ?
+          AND d.total_bytes - d.used_bytes >= ?
+        ORDER BY (d.total_bytes - d.used_bytes) DESC, d.disk_id
         """,
-        (limit_pct, required_bytes),
+        (cfg.disk_usage_limit_pct / 100.0, required_bytes),
     ).fetchall()
+    candidates = [dict(r) for r in rows if r['disk_id'] not in excluded_disks
+                  and r['node_id'] not in excluded_nodes]
+    result: list[dict[str, Any]] = []
+    used_disks = set(excluded_disks)
+    used_nodes = set(excluded_nodes)
 
-    chosen: list[dict[str, Any]] = []
-    seen_nodes: set[str] = set(exclude_nodes)
-    seen_disks: set[str] = set(exclude_disks)
+    # Primeira rodada: maximiza a diversidade de máquinas.
+    for disk in candidates:
+        if disk['node_id'] in used_nodes:
+            continue
+        result.append(disk)
+        used_nodes.add(disk['node_id'])
+        used_disks.add(disk['disk_id'])
+        if len(result) >= n:
+            return result
 
-    for row in rows:
-        d = dict(row)
-        if d["disk_id"] in seen_disks:
+    # Segunda rodada: somente se faltar máquina; disco distinto é obrigatório.
+    for disk in candidates:
+        if disk['disk_id'] in used_disks:
             continue
-        if d["node_id"] in seen_nodes:
-            continue
-        chosen.append(d)
-        seen_disks.add(d["disk_id"])
-        seen_nodes.add(d["node_id"])
-        if len(chosen) == n:
+        result.append(disk)
+        used_disks.add(disk['disk_id'])
+        if len(result) >= n:
             break
+    return result
 
-    return chosen
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -272,26 +272,29 @@ def list_chunks_of_node(
 def get_under_replicated_chunks(
     conn: sqlite3.Connection, limit: int = 100
 ) -> list[dict[str, Any]]:
+    """Chunks CONFIRMADOS abaixo do N próprio do arquivo, do mais crítico ao menos.
+
+    Réplicas em nós dead/draining não contam como disponíveis para reparo.
     """
-    Retorna chunks com menos réplicas vivas (state='ok') que N,
-    ordenados por número de réplicas vivas (prioridade para os mais críticos).
-    Usada pela fila de re-replicação da Pessoa C.
-    """
-    n = cfg.replication_factor
     rows = conn.execute(
         """
         SELECT c.chunk_id, c.path, c.hash,
-               COUNT(CASE WHEN r.state = 'ok' THEN 1 END) AS live_replicas
-        FROM   chunks   c
-        JOIN   replicas r USING(chunk_id)
-        GROUP  BY c.chunk_id
-        HAVING live_replicas < ?
-        ORDER  BY live_replicas ASC
-        LIMIT  ?
-        """,
-        (n, limit),
+               COUNT(CASE WHEN r.state = 'ok' AND n.status IN ('alive', 'suspect')
+                          THEN 1 END) AS live_replicas
+        FROM chunks c
+        JOIN entries e ON e.path = c.path
+        LEFT JOIN replicas r ON r.chunk_id = c.chunk_id
+        LEFT JOIN disks d ON d.disk_id = r.disk_id
+        LEFT JOIN nodes n ON n.node_id = d.node_id
+        GROUP BY c.chunk_id
+        HAVING live_replicas < COALESCE(e.replication_factor, ?)
+        ORDER BY live_replicas ASC, c.path, c.idx
+        LIMIT ?
+        """, (cfg.replication_factor, limit),
     ).fetchall()
     return _rows(rows)
+
+
 
 
 def mark_replica_as(
@@ -336,7 +339,7 @@ def count_live_replicas(
     conn: sqlite3.Connection, chunk_id: str
 ) -> int:
     row = conn.execute(
-        """SELECT COUNT(DISTINCT d.node_id) FROM replicas r JOIN disks d USING(disk_id)
+        """SELECT COUNT(*) FROM replicas r JOIN disks d USING(disk_id)
            JOIN nodes n USING(node_id) WHERE r.chunk_id = ? AND r.state = 'ok'
            AND n.status IN ('alive', 'suspect', 'draining')""",
         (chunk_id,),
@@ -366,6 +369,7 @@ def get_live_replicas(
         JOIN   nodes    n USING(node_id)
         WHERE  r.chunk_id = ?
           AND  r.state    = 'ok'
+          AND  d.total_bytes > 0
           AND  n.status   IN ('alive', 'suspect', 'draining')
         ORDER  BY CASE n.status WHEN 'alive' THEN 0 WHEN 'draining' THEN 1 ELSE 2 END
         """,
@@ -391,38 +395,124 @@ def add_replica(
     conn.commit()
 
 
+def _enqueue_cleanup(conn: sqlite3.Connection,
+                     rows: list[dict[str, Any]], delay_s: float = 0) -> None:
+    """Agenda deleção física durável; o worker tentará novamente se falhar."""
+    for row in rows:
+        conn.execute(
+            """INSERT INTO chunk_cleanup_queue(chunk_id, disk_id, node_url, not_before)
+               VALUES(?,?,?,?)
+               ON CONFLICT(chunk_id,disk_id) DO UPDATE SET
+                 node_url=excluded.node_url,
+                 not_before=excluded.not_before""",
+            (row['chunk_id'], row['disk_id'], row['node_url'], time.time() + delay_s),
+        )
+
+
+def abort_staged_upload(conn: sqlite3.Connection, path: str, lease_id: str) -> int:
+    """Desfaz alocação sob transação aberta, sem afetar versão commitada.
+
+    Todas as réplicas alocadas são agendadas para deleção, inclusive aquelas
+    que o cliente conseguiu gravar antes de o lease vencer. Não dá commit;
+    chamador é responsável pela atomicidade.
+    """
+    rows = _rows(conn.execute(
+        """SELECT s.chunk_id, r.disk_id, n.address AS node_url
+           FROM staged_chunks s JOIN staged_replicas r USING(chunk_id)
+           JOIN disks d ON d.disk_id = r.disk_id
+           JOIN nodes n ON n.node_id = d.node_id
+           WHERE s.path=? AND s.lease_id=?""", (path, lease_id),
+    ).fetchall())
+    _enqueue_cleanup(conn, rows)
+    conn.execute("DELETE FROM staged_chunks WHERE path=? AND lease_id=?",
+                 (path, lease_id))
+    conn.execute("DELETE FROM leases WHERE path=? AND lease_id=?",
+                 (path, lease_id))
+    # Apenas entry nova/incompleta deve ser removida: nunca apagar versão anterior.
+    conn.execute(
+        """DELETE FROM entries WHERE path=? AND state='recovering'
+           AND file_hash IS NULL
+           AND NOT EXISTS(SELECT 1 FROM chunks WHERE chunks.path=entries.path)""",
+        (path,),
+    )
+    return len(rows)
+
+
+def cleanup_expired_uploads(conn: sqlite3.Connection, path: str | None = None) -> int:
+    """Limpa leases expirados atomicamente, podendo limitar a um path."""
+    conn.execute('BEGIN IMMEDIATE')
+    try:
+        now = time.time()
+        if path is None:
+            rows = conn.execute(
+                'SELECT path, lease_id FROM leases WHERE expires_at<=?', (now,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT path, lease_id FROM leases WHERE path=? AND expires_at<=?',
+                (path, now),
+            ).fetchall()
+        for row in rows:
+            abort_staged_upload(conn, row['path'], row['lease_id'])
+        conn.commit()
+        return len(rows)
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def due_chunk_cleanup(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
+    """Lê trabalhos de deleção física vencidos (idempotentes)."""
+    return _rows(conn.execute(
+        """SELECT q.chunk_id, q.disk_id, q.attempts,
+                  COALESCE(n.address, q.node_url) AS node_url
+           FROM chunk_cleanup_queue q
+           LEFT JOIN disks d ON d.disk_id = q.disk_id
+           LEFT JOIN nodes n ON n.node_id = d.node_id
+           WHERE q.not_before <= ?
+             AND (n.status IS NULL OR n.status IN ('alive', 'draining'))
+           ORDER BY q.not_before LIMIT ?""",
+        (time.time(), limit),
+    ).fetchall())
+
+
+def finish_chunk_cleanup(conn: sqlite3.Connection, chunk_id: str,
+                         disk_id: str, success: bool, attempts: int = 0) -> None:
+    if success:
+        conn.execute(
+            'DELETE FROM chunk_cleanup_queue WHERE chunk_id=? AND disk_id=?',
+            (chunk_id, disk_id),
+        )
+    else:
+        delay = min(60, 2 ** min(attempts + 1, 6))
+        conn.execute(
+            """UPDATE chunk_cleanup_queue SET attempts=attempts+1,
+               not_before=? WHERE chunk_id=? AND disk_id=?""",
+            (time.time() + delay, chunk_id, disk_id),
+        )
+    conn.commit()
+
+
 def delete_pending_replicas_of_lease(
     conn: sqlite3.Connection, path: str
 ) -> list[dict[str, Any]]:
-    """
-    Remove réplicas pending e chunks do arquivo com esse path que não foram
-    commitados. Retorna lista de (chunk_id, disk_id, node_url) para o worker
-    chamar DELETE /chunks/{chunk_id} nos nós.
-    Chamada pelo worker de expiração de leases da Pessoa C.
-    """
-    # Lê as réplicas pending para retornar ao worker
-    rows = conn.execute(
-        """
-        SELECT r.chunk_id, r.disk_id, n.address AS node_url
-        FROM   replicas r
-        JOIN   chunks   c USING(chunk_id)
-        JOIN   disks    d USING(disk_id)
-        JOIN   nodes    n ON n.node_id = d.node_id
-        WHERE  c.path  = ?
-          AND  r.state = 'pending'
-        """,
-        (path,),
-    ).fetchall()
-    to_delete = _rows(rows)
-
-    # Deleta chunks (cascata remove réplicas via FK)
-    conn.execute(
-        "DELETE FROM chunks WHERE path = ? AND chunk_id IN "
-        "(SELECT chunk_id FROM replicas WHERE state = 'pending')",
-        (path,),
-    )
+    """Compatibilidade: remove apenas staging, nunca chunks já commitados."""
+    lease = conn.execute('SELECT lease_id FROM leases WHERE path=?', (path,)).fetchone()
+    if lease is None:
+        return []
+    rows = _rows(conn.execute(
+        """SELECT s.chunk_id, r.disk_id, n.address AS node_url
+           FROM staged_chunks s JOIN staged_replicas r USING(chunk_id)
+           JOIN disks d ON d.disk_id = r.disk_id
+           JOIN nodes n ON n.node_id = d.node_id
+           WHERE s.path=? AND s.lease_id=?""",
+        (path, lease['lease_id']),
+    ).fetchall())
+    abort_staged_upload(conn, path, lease['lease_id'])
     conn.commit()
-    return to_delete
+    return rows
+
+
 
 
 def update_entry_state(

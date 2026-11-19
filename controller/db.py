@@ -114,12 +114,6 @@ CREATE TABLE IF NOT EXISTS node_rejoins (
     registered_at REAL NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS chunk_deletions (
-    chunk_id TEXT NOT NULL,
-    disk_id TEXT NOT NULL REFERENCES disks(disk_id) ON DELETE CASCADE,
-    PRIMARY KEY (chunk_id, disk_id)
-);
-
 -- ============================================================
 -- Índices para consultas frequentes
 -- ============================================================
@@ -130,6 +124,34 @@ CREATE INDEX IF NOT EXISTS idx_replicas_state    ON replicas(state);
 CREATE INDEX IF NOT EXISTS idx_disks_node        ON disks(node_id);
 CREATE INDEX IF NOT EXISTS idx_entries_type      ON entries(type);
 CREATE INDEX IF NOT EXISTS idx_leases_expires    ON leases(expires_at);
+
+-- Chunks e réplicas ainda não confirmados: NÃO aparecem em /files/locate.
+-- A chave (path, idx) pode coexistir nas tabelas committed e staged.
+CREATE TABLE IF NOT EXISTS staged_chunks (
+    chunk_id TEXT PRIMARY KEY,
+    path TEXT NOT NULL REFERENCES entries(path) ON DELETE CASCADE,
+    lease_id TEXT NOT NULL,
+    idx INTEGER NOT NULL,
+    UNIQUE(path, idx)
+);
+CREATE TABLE IF NOT EXISTS staged_replicas (
+    chunk_id TEXT NOT NULL REFERENCES staged_chunks(chunk_id) ON DELETE CASCADE,
+    disk_id TEXT NOT NULL REFERENCES disks(disk_id) ON DELETE CASCADE,
+    PRIMARY KEY(chunk_id, disk_id)
+);
+CREATE INDEX IF NOT EXISTS idx_staged_lease ON staged_chunks(lease_id);
+
+-- Deleções físicas persistentes, com retries em caso de nó indisponível.
+CREATE TABLE IF NOT EXISTS chunk_cleanup_queue (
+    chunk_id TEXT NOT NULL,
+    disk_id TEXT NOT NULL,
+    node_url TEXT NOT NULL,
+    not_before REAL NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(chunk_id, disk_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cleanup_due ON chunk_cleanup_queue(not_before);
+
 """
 
 
@@ -157,13 +179,24 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             finally:
                 conn.close()
     """
-    path = db_path or _DEFAULT_DB_PATH
+    path = db_path or Path(os.environ.get("DB_PATH", _DEFAULT_DB_PATH))
     path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     _apply_pragmas(conn)
     conn.executescript(_SCHEMA_SQL)
+    # Migração idempotente para bancos preexistentes, sem apagar metadados.
+    cols = {row['name'] for row in conn.execute('PRAGMA table_info(entries)')}
+    if 'replication_factor' not in cols:
+        conn.execute('ALTER TABLE entries ADD COLUMN replication_factor INTEGER')
+    cols = {row['name'] for row in conn.execute('PRAGMA table_info(leases)')}
+    if 'replication_factor' not in cols:
+        conn.execute('ALTER TABLE leases ADD COLUMN replication_factor INTEGER NOT NULL DEFAULT 3')
+    if 'expected_size' not in cols:
+        conn.execute('ALTER TABLE leases ADD COLUMN expected_size INTEGER')
+    if 'expected_chunks' not in cols:
+        conn.execute('ALTER TABLE leases ADD COLUMN expected_chunks INTEGER')
     conn.commit()
     return conn
 
