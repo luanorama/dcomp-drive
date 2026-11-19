@@ -296,9 +296,9 @@ dcomp-drive/
 
 | Pessoa | Responsabilidade | Requisitos |
 |--------|-----------------|------------|
-| **A (Raissa)** | Controlador, metadados, posicionamento, concorrência, persistência | RF1, RF3, RF7, RF8, RF10 |
-| **B** | Nó de armazenamento, CLI, chunks, hash, criptografia, scrubbing | RF2, RF4, RF9 |
-| **C** | Docker Compose, heartbeat, detecção de falhas, re-replicação, drain, logs | RF5, RF6, RF11, RF12 |
+| **RAISSA** | Controlador, metadados, posicionamento, concorrência, persistência | RF1, RF3, RF7, RF8, RF10 |
+| **LUAN** | Nó de armazenamento, CLI, chunks, hash, criptografia, scrubbing | RF2, RF4, RF9 |
+| **FÁBIO** | Docker Compose, heartbeat, detecção de falhas, re-replicação, drain, logs | RF5, RF6, RF11, RF12 |
 
 ---
 
