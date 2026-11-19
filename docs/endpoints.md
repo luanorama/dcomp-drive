@@ -75,13 +75,39 @@ Funções do `repository.py` para a Pessoa C:
 
 | Método | Rota | Status |
 |--------|------|--------|
-| PUT | `/chunks/{chunk_id}?disk_id=&hash=` | 🔲 Pessoa B |
-| GET | `/chunks/{chunk_id}?disk_id=` | 🔲 Pessoa B |
-| DELETE | `/chunks/{chunk_id}?disk_id=` | 🔲 Pessoa B |
-| GET | `/chunks` | 🔲 Pessoa B |
-| POST | `/chunks/{chunk_id}/copy` | 🔲 Pessoa B |
-| GET | `/health` | 🔲 Pessoa B |
-| GET | `/metrics` | 🔲 Pessoa B |
+| PUT | `/chunks/{chunk_id}?disk_id=&hash=` | ✅ Implementado e testado |
+| GET | `/chunks/{chunk_id}?disk_id=` | ✅ Implementado e testado |
+| DELETE | `/chunks/{chunk_id}?disk_id=` | ✅ Implementado e testado |
+| GET | `/chunks` | ✅ Implementado e testado |
+| POST | `/chunks/{chunk_id}/copy` | ✅ Implementado e testado |
+| GET | `/health` | ✅ Implementado e testado |
+| GET | `/metrics` | ✅ Implementado e testado |
+
+### Pessoa B — contratos adicionais
+
+| Método | Rota | Resposta | Status |
+|--------|------|----------|--------|
+| POST | `/scrub` | `{checked, corrupt:[{chunk_id,disk_id}], duration_s}` | ✅ Implementado e testado |
+
+`GET /health` do nó devolve `{ok, node_id, disks}`. Cada item de `disks` tem
+`disk_id`, `path`, `total_bytes` e `used_bytes`; os três últimos são medidos em
+bytes inteiros e o identificador é `node_id/nome-da-pasta`. A mesma lista é
+exposta por `storage_node.disks.list_disks(settings)` para o agente da Pessoa C.
+
+`GET /metrics` devolve `node_id`, `uptime_s`, `chunks_stored`, espaço por disco,
+contadores e latências de `put`, `get` e `copy`, contagem de `delete`,
+`hash_failures` e o resumo do último scrubbing.
+
+`NODE_ADDRESS` define o endereço anunciado pelo nó. Sem essa variável, o padrão
+é `http://{NODE_ID}:{NODE_PORT}`, com `NODE_PORT=9000` quando não informado.
+`DATA_DIRS` aceita vários diretórios separados por `:` em Unix e `;` no Windows.
+Discos com o mesmo nome de pasta são recusados para manter `disk_id` único.
+
+O agente de registro e heartbeat continua sob responsabilidade da Pessoa C. O
+contrato de integração é `async def run(settings, list_disks)`, em que
+`list_disks` devolve a lista no formato de `/nodes/register`. O nó detecta e
+inicia esse agente quando `storage_node.agent` estiver disponível; falhas do
+agente são registradas sem impedir a inicialização do serviço de chunks.
 
 ---
 
