@@ -90,7 +90,7 @@ def test_delete_is_idempotent_and_removes_quarantine(tmp_path: Path) -> None:
 
 def test_get_detects_corruption_quarantines_and_reports_once(tmp_path: Path) -> None:
     reports: list[tuple[str, str]] = []
-    app = create_app(settings_for(tmp_path), report_corrupt=lambda chunk, disk: reports.append((chunk, disk)) or 200)
+    app = create_app(settings_for(tmp_path), report_corrupt=lambda chunk, disk: reports.append((chunk, disk)) or 503)
     chunk_id = str(uuid.uuid4())
     with TestClient(app) as client:
         assert put(client, chunk_id, b"abcdef").status_code == 200
@@ -104,6 +104,19 @@ def test_get_detects_corruption_quarantines_and_reports_once(tmp_path: Path) -> 
         assert list(path.parent.glob("*.chunk.corrupt"))
         assert client.get(f"/chunks/{chunk_id}", params={"disk_id": "node1/disk1"}).status_code == 404
         assert client.get("/chunks").json()["chunks"] == []
+
+
+def test_successful_get_corruption_report_discards_quarantine(tmp_path: Path) -> None:
+    app = create_app(settings_for(tmp_path), report_corrupt=lambda *_: 200)
+    chunk_id = str(uuid.uuid4())
+    with TestClient(app) as client:
+        assert put(client, chunk_id, b"expected").status_code == 200
+        path = app.state.store.find(chunk_id, "node1/disk1")
+        assert path is not None
+        path.write_bytes(b"modified")
+        response = client.get(f"/chunks/{chunk_id}", params={"disk_id": "node1/disk1"})
+        assert response.status_code == 422
+        assert list(path.parent.glob("*.chunk.corrupt")) == []
 
 
 def test_scrub_discards_reported_corruption_and_retries_failed_report(tmp_path: Path) -> None:

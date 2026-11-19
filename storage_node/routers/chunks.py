@@ -36,8 +36,15 @@ def install_chunk_routes(app: FastAPI, settings: NodeSettings, store: ChunkStore
     def report_later(chunk_id: str, disk_id: str) -> None:
         try:
             status = reporter(chunk_id, disk_id)
+            status_code = getattr(status, "status_code", status)
+            if status_code is None or status_code is True:
+                status_code = 200
+            elif status_code is False:
+                status_code = 503
+            if isinstance(status_code, int) and (status_code == 404 or 200 <= status_code < 300):
+                store.delete(chunk_id, disk_id)
             log.info("corrupt_reported", chunk_id=chunk_id, disk_id=disk_id,
-                     status=getattr(status, "status_code", status))
+                     status=status_code)
         except (OSError, TimeoutError, ValueError) as exc:
             log.warning("corrupt_report_failed", chunk_id=chunk_id, disk_id=disk_id,
                         error=str(exc))
@@ -71,7 +78,7 @@ def install_chunk_routes(app: FastAPI, settings: NodeSettings, store: ChunkStore
             body, chunk_hash = store.get(chunk_id, disk_id)
         except StoreError as exc:
             metrics.record("get", (time.perf_counter() - started) * 1000, error=True)
-            if exc.status_code == 422:
+            if exc.status_code == 422 and str(exc).startswith("Chunk corrompido:"):
                 with metrics.lock:
                     metrics.hash_failures += 1
                 log.warning("chunk_corrupt_detected", chunk_id=chunk_id, disk_id=disk_id,
@@ -114,7 +121,7 @@ def install_chunk_routes(app: FastAPI, settings: NodeSettings, store: ChunkStore
             data, chunk_hash = store.get(chunk_id, body.disk_id)
         except StoreError as exc:
             metrics.record("copy", (time.perf_counter() - started) * 1000, error=True)
-            if exc.status_code == 422:
+            if exc.status_code == 422 and str(exc).startswith("Chunk corrompido:"):
                 with metrics.lock:
                     metrics.hash_failures += 1
                 report_later(chunk_id, body.disk_id)
