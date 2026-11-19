@@ -16,8 +16,8 @@ from common.hashing import sha256_hex, valid_hash
 from common.jsonlog import get_logger
 from controller.config import get_config
 from client.api import ApiError, ControllerClient, make_http, parse_error
-from client.crypto import (CryptoError, OVERHEAD, decrypt_chunk, encrypt_chunk,
-                           ensure_plain_chunk, load_key, validate_algorithm)
+from client.crypto import (CryptoError, decrypt_chunk, encrypt_chunk,
+                           ensure_plain_chunk, load_key, stored_size, validate_algorithm)
 
 log = get_logger("client.transfer")
 
@@ -139,7 +139,7 @@ def put_file(local_path: str | Path, remote_path: str, controller: ControllerCli
         raise TransferError(f"Não foi possível ler o arquivo local: {exc}") from exc
     size = before.st_size
     num_chunks = max(1, (size + chunk_size - 1) // chunk_size)
-    stored_total = size + (OVERHEAD * num_chunks if encrypt_enabled else 0)
+    stored_total = stored_size(size, num_chunks, encrypt_enabled)
     started = time.perf_counter()
     log.info("put_started", path=remote_path, bytes=size, chunks=num_chunks)
     allocated = False

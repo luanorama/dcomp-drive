@@ -13,7 +13,7 @@ import pytest
 
 from client.api import ApiError, ControllerClient, parse_error
 from client.cli import main, validate_remote_path
-from client.crypto import CryptoError, decrypt_chunk, encrypt_chunk, load_key
+from client.crypto import CryptoError, decrypt_chunk, encrypt_chunk, load_key, stored_size
 from client.transfer import TransferError, get_file, put_file
 from common.hashing import sha256_hex
 
@@ -238,6 +238,9 @@ def test_get_all_bad_leaves_old_destination_and_no_part(tmp_path: Path) -> None:
 def test_crypto_flags_wrong_key_and_aad(tmp_path: Path) -> None:
     key = load_key("34" * 32)
     assert len(load_key(base64.b64encode(key).decode("ascii"))) == 32
+    assert stored_size(0, 1, True) == 36
+    assert stored_size(5, 2, True) == 77
+    assert stored_size(5, 2, False) == 5
     chunk_a = str(uuid.uuid4())
     chunk_b = str(uuid.uuid4())
     cipher = encrypt_chunk(b"plain", chunk_a, 0, key)

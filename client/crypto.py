@@ -53,6 +53,13 @@ def validate_algorithm(encryption_enabled: bool, algorithm: str) -> None:
         raise CryptoError("A criptografia habilitada exige encryption.algorithm=aes-256-gcm.")
 
 
+def stored_size(plain_size: int, num_chunks: int, encryption_enabled: bool) -> int:
+    """Calcula o tamanho enviado ao controlador, incluindo nonce e tag."""
+    if plain_size < 0 or num_chunks < 1:
+        raise ValueError("Tamanho original ou número de chunks inválido.")
+    return plain_size + (OVERHEAD * num_chunks if encryption_enabled else 0)
+
+
 def encrypt_chunk(plain: bytes, chunk_id: str, idx: int, key: bytes) -> bytes:
     """Cifra um chunk com nonce novo e AAD vinculada à sua posição."""
     nonce = os.urandom(NONCE_SIZE)
