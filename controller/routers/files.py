@@ -170,7 +170,7 @@ def _parent_exists(conn: sqlite3.Connection, path: str) -> bool:
 async def _notify_delete_chunk(node_url: str, chunk_id: str, disk_id: str) -> None:
     """Envia DELETE /chunks/{chunk_id}?disk_id= ao nó de forma não bloqueante."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
             await client.delete(
                 f"{node_url}/chunks/{chunk_id}",
                 params={"disk_id": disk_id},
@@ -326,34 +326,43 @@ def commit_file(
         w = cfg.write_quorum
         total_size = 0
         under_replicated = False
-        unconfirmed: list[tuple[CommitChunk, list[str]]] = []
+        confirmations: dict[str, set[str]] = {}
+        unconfirmed: list[CommitChunk] = []
         for expected in staged:
             chunk = supplied.get(expected['idx'])
             if chunk is None or chunk.chunk_id != expected['chunk_id']:
                 raise HTTPException(status_code=422, detail={
                     'error': 'chunk_id/idx não pertence a este lease e path.'})
-            disks = {r['disk_id'] for r in conn.execute(
-                'SELECT disk_id FROM staged_replicas WHERE chunk_id=?',
+            assigned = conn.execute(
+                """SELECT r.disk_id, d.total_bytes, n.status FROM staged_replicas r
+                   JOIN disks d USING(disk_id) JOIN nodes n USING(node_id)
+                   WHERE r.chunk_id=?""",
                 (chunk.chunk_id,),
-            ).fetchall()}
-            if len(chunk.confirmed) != len(set(chunk.confirmed)) or not set(chunk.confirmed) <= disks:
+            ).fetchall()
+            disks = {r['disk_id'] for r in assigned}
+            provided = set(chunk.confirmed)
+            if len(chunk.confirmed) != len(provided) or not provided <= disks:
                 raise HTTPException(status_code=422, detail={
                     'error': 'Discos confirmados não pertencem à alocação ou estão repetidos.'})
+            available = {r['disk_id'] for r in assigned
+                         if r['status'] != 'dead' and r['total_bytes'] > 0}
+            confirmed = provided & available
+            confirmations[chunk.chunk_id] = confirmed
             total_size += chunk.size
-            if len(chunk.confirmed) < w:
-                unconfirmed.append((chunk, sorted(disks)))
-            if len(chunk.confirmed) < n:
+            if len(confirmed) < w:
+                unconfirmed.append(chunk)
+            if len(confirmed) < n:
                 under_replicated = True
         if lease['expected_size'] is not None and total_size != lease['expected_size']:
             raise HTTPException(status_code=422, detail={
                 'error': 'Tamanho confirmado difere do tamanho informado na alocação.'})
         if unconfirmed:
-            failed = unconfirmed[0][0]
+            failed = unconfirmed[0]
             repo.abort_staged_upload(conn, body.path, body.lease_id)
             conn.commit()
             raise HTTPException(status_code=507, detail={
                 'error': f'Quórum não atingido no chunk {failed.idx}: '
-                         f'{len(failed.confirmed)}/{w} confirmações.'})
+                         f'{len(confirmations[failed.chunk_id])}/{w} confirmações.'})
 
         # Agenda remoção das réplicas antigas com prazo de leitura em andamento.
         old = [dict(r) for r in conn.execute(
@@ -375,7 +384,7 @@ def commit_file(
                 (chunk.chunk_id,),
             ).fetchall()
             for disk in allocated:
-                state = 'ok' if disk['disk_id'] in chunk.confirmed else 'lost'
+                state = 'ok' if disk['disk_id'] in confirmations[chunk.chunk_id] else 'lost'
                 conn.execute(
                     'INSERT INTO replicas(chunk_id,disk_id,state) VALUES(?,?,?)',
                     (chunk.chunk_id, disk['disk_id'], state),
@@ -418,7 +427,7 @@ def locate_file(
         entry = repo.get_entry(conn, path)
         if entry is None or entry['type'] != 'file':
             raise HTTPException(status_code=404, detail={'error': 'Arquivo não encontrado.'})
-        if entry['state'] == 'recovering':
+        if entry['file_hash'] is None:
             raise HTTPException(status_code=409, detail={
                 'error': 'Arquivo ainda não possui versão confirmada.'})
         chunks = conn.execute(
@@ -684,7 +693,8 @@ def report_corrupt(
 
     # Atualiza estado do arquivo para 'recovering' se necessário
     live = repo.count_live_replicas(conn, body.chunk_id)
-    desired_n = (repo.get_entry(conn, chunk['path']) or {}).get('replication_factor')         or cfg.replication_factor
+    entry = repo.get_entry(conn, chunk['path']) or {}
+    desired_n = entry.get('replication_factor') or cfg.replication_factor
     if live < desired_n:
         repo.update_entry_state(conn, chunk["path"], "under_replicated")
 

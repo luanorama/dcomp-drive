@@ -104,6 +104,16 @@ CREATE TABLE IF NOT EXISTS leases (
     expires_at REAL NOT NULL
 );
 
+-- Estado do drain separado do estado de conectividade do nó.
+CREATE TABLE IF NOT EXISTS node_drains (
+    node_id TEXT PRIMARY KEY REFERENCES nodes(node_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS node_rejoins (
+    node_id TEXT PRIMARY KEY REFERENCES nodes(node_id) ON DELETE CASCADE,
+    registered_at REAL NOT NULL
+);
+
 -- ============================================================
 -- Índices para consultas frequentes
 -- ============================================================
@@ -169,7 +179,7 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             finally:
                 conn.close()
     """
-    path = db_path or _DEFAULT_DB_PATH
+    path = db_path or Path(os.environ.get("DB_PATH", _DEFAULT_DB_PATH))
     path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(path), check_same_thread=False)

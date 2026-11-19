@@ -55,19 +55,31 @@ Inspirado em HDFS, GFS, Ceph e MinIO.
 
 ### Opção 1: Docker Compose (recomendado)
 
-Sobe 1 controlador e 5 nós de armazenamento com um único comando:
+O controlador pode subir sozinho enquanto os endpoints de armazenamento estão
+em desenvolvimento.
 
 ```bash
-# Clonar o repositório
-git clone <url-do-repositório>
-cd dcomp-drive
-
-# Subir o ambiente completo
-docker compose up --build
-
-# Em outro terminal, usar o CLI
-docker compose exec client python -m client.cli put /docs/arquivo.txt ./arquivo_local.txt
+docker compose up --build controller
+curl -s http://localhost:8000/health
 ```
+
+Com a aplicação do nó disponível em `storage_node/main.py`, o perfil `storage`
+sobe um controlador e cinco nós, com dois volumes de dados por nó.
+
+```bash
+docker compose --profile storage up --build -d
+curl -s http://localhost:8000/status
+bash scripts/test-recovery.sh
+```
+
+O teste grava um arquivo de amostra, para um nó que contém uma réplica, aguarda
+a recuperação, confere o SHA-256 em cada réplica recuperada e religa o nó.
+Use um ambiente de teste. Para simular uma corrupção, obtenha o UUID do chunk
+e o disco pelo estado do arquivo e rode `bash scripts/fault.sh corrupt node1 disk1 UUID`.
+
+O `drain` pode ser solicitado por `POST /nodes/node1/drain`. Aguarde
+`drain_remaining_chunks: 0` e `pending_deletions: 0` em `/status` antes de desligar o nó.
+A migração aguarda espaço e nós suficientes para restabelecer N cópias fora dos nós em drain.
 
 ### Opção 2: Execução local (desenvolvimento)
 
@@ -80,7 +92,7 @@ DB_PATH=./controller.db uvicorn controller.main:app --host 0.0.0.0 --port 8000 -
 
 # Em outro terminal, subir um nó de armazenamento (porta 9000)
 NODE_ID=node1 DATA_DIRS=/tmp/dcomp/node1/disk1:/tmp/dcomp/node1/disk2 \
-  uvicorn storage_node.main:app --host 0.0.0.0 --port 9000 --reload
+  uvicorn storage_node.service:app --host 0.0.0.0 --port 9000 --reload
 ```
 
 ---
