@@ -116,6 +116,8 @@ def test_replication_fallback_to_other_disk_same_machine(client):
     assert len({t['disk_id'] for t in targets}) == 3
     assert len({t['node_id'] for t in targets}) == 2
     conn.close()
+    allocation = allocate(client, '/arquivo-fallback.bin', n=3)
+    assert '3 réplicas em apenas 2 nós' in allocation['warning']
 
 
 def test_per_file_replication_factor(client):

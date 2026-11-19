@@ -258,6 +258,13 @@ def allocate_file(
                              f"{len(targets)} disponíveis (N={n}, W={cfg.write_quorum})."})
             if len(targets) < n:
                 warning = f'Apenas {len(targets)} discos disponíveis (N={n}); sub-replicado.'
+            else:
+                node_count = len({target['node_id'] for target in targets})
+                if node_count < n:
+                    warning = (
+                        f'{n} réplicas em apenas {node_count} nós; '
+                        'a perda de um nó pode eliminar mais de uma réplica.'
+                    )
             chunk_id = str(uuid.uuid4())
             conn.execute(
                 'INSERT INTO staged_chunks(chunk_id,path,lease_id,idx) VALUES(?,?,?,?)',
